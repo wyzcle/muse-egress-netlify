@@ -1,3 +1,5 @@
 deploy.zip
 .netlify-token
 node_modules/
+.netlify/
+deno.lock
