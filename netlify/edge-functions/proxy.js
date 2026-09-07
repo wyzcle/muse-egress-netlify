@@ -298,6 +298,57 @@ function responsesToAnthropic(respObj, model) {
   };
 }
 
+// ── 流式直通：立即 200 SSE + 周期 ping 保活 + 后台泵上游 ──
+// 为什么：Netlify 边缘函数有 40s 响应头超时 + 函数级超时预算（超限回
+// "the edge function timed out"）。旧写法 await fetch 到上游首包才返回响应头，
+// muse xhigh 长推理/大请求会撞死（网关看到 502）。改为先返回 200（响应头
+// 超时归零），上游等待期每 10s 发 SSE 注释行防整条链路空闲掐断；上游非 200
+// 转成流内 error 帧（code=upstream_status_NNN），网关探测期识别后透明重试/
+// 换桶（对齐 6448 流内错误协议），下游无感。
+function egressStreamResponse(upP) {
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      let closed = false;
+      const push = (s) => { if (closed) return; try { controller.enqueue(enc.encode(s)); } catch { closed = true; } };
+      const ping = setInterval(() => push(": ping\n\n"), 10000);
+      try {
+        const r = await upP;
+        push(`: egress-status: ${r.status}\n\n`);
+        if (r.ok && r.body) {
+          const reader = r.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (closed) { try { reader.cancel(); } catch {} break; }
+            try { controller.enqueue(value); } catch { closed = true; try { reader.cancel(); } catch {} break; }
+          }
+        } else {
+          let txt = "";
+          try { txt = await r.text(); } catch {}
+          let msg = txt ? txt.slice(0, 500) : `upstream ${r.status}`;
+          let type = "upstream_error";
+          try {
+            const j = JSON.parse(txt);
+            msg = String(j.error?.message || j.message || j.detail || msg).slice(0, 500);
+            type = String(j.error?.type || j.type || type);
+          } catch {}
+          push(`data: ${JSON.stringify({ error: { message: msg, type, code: "upstream_status_" + r.status } })}\n\ndata: [DONE]\n\n`);
+        }
+      } catch (e) {
+        push(`data: ${JSON.stringify({ error: { message: "egress fetch failed: " + (e?.message || e), type: "upstream_error", code: "upstream_status_502" } })}\n\ndata: [DONE]\n\n`);
+      } finally {
+        clearInterval(ping);
+        try { controller.close(); } catch {}
+      }
+    },
+  });
+  return new Response(stream, { status: 200, headers: {
+    "content-type": "text/event-stream", "cache-control": "no-cache, no-transform",
+    "connection": "keep-alive", "access-control-allow-origin": "*",
+  } });
+}
+
 export default async function handler(req) {
   const url = new URL(req.url);
   const targetPath = url.searchParams.get("zp") || url.pathname;
@@ -480,14 +531,25 @@ export default async function handler(req) {
   // 唯一例外：muse-spark 的 responses 请求没带 reasoning.effort 时默认补 xhigh
   // （对齐本地脚本满血默认；客户端显式值一律保留）。
   let body = ["GET", "HEAD"].includes(method) ? undefined : rawBody;
-  if (targetPath === "/v1/responses" && bridge && reqJson) {
-    const patch = {};
-    if (!reqJson.reasoning?.effort && !reqJson.reasoning_effort && !reqJson.effort) {
-      patch.reasoning = { effort: "xhigh" };
+  if (targetPath === "/v1/responses" && reqJson) {
+    if (bridge) {
+      const patch = {};
+      if (!reqJson.reasoning?.effort && !reqJson.reasoning_effort && !reqJson.effort) {
+        patch.reasoning = { effort: "xhigh" };
+      }
+      const n = Number(reqJson.max_output_tokens);
+      if (!Number.isFinite(n) || n < MIN_OUTPUT_TOKENS) patch.max_output_tokens = MIN_OUTPUT_TOKENS;
+      if (Object.keys(patch).length) body = JSON.stringify({ ...reqJson, ...patch });
     }
-    const n = Number(reqJson.max_output_tokens);
-    if (!Number.isFinite(n) || n < MIN_OUTPUT_TOKENS) patch.max_output_tokens = MIN_OUTPUT_TOKENS;
-    if (Object.keys(patch).length) body = JSON.stringify({ ...reqJson, ...patch });
+    // 流式一律走立即-200 通道（绕开 40s 响应头超时/函数超时；错误转流内帧）
+    if (reqJson.stream) {
+      const upP = fetch(UPSTREAM + "/zen" + targetPath, {
+        method,
+        headers: zenHeaders(req.headers.get("content-type"), fwd),
+        body,
+      });
+      return egressStreamResponse(upP);
+    }
   }
   const r = await fetch(UPSTREAM + "/zen" + targetPath, {
     method,
