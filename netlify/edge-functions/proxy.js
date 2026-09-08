@@ -3,7 +3,7 @@
 // 出口 IP 也随 POP。Edge 限制：50ms CPU（IO 等待不计）、首包须 40s 内开始、无墙钟上限公布。
 export const config = { path: ["/v1/*", "/geo", "/"] };
 
-const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1788883600855
+const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1788883610020
 const UA = "opencode/1.17.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
 
 // responses-only 模型：zen 上只有 /v1/responses 端口，chat/messages 需桥接。
