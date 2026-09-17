@@ -224,11 +224,15 @@ function zenHeaders(contentType, fwd) {
   };
 }
 
-// 无依赖随手 id（edge runtime 零引入；上游只要求有值，不校验归属）
+// 官方 ID 形态（2026-09-17 实测官方 CLI：ses_f52ee0f08ffe9UfMeH9FHD2nwX）：
+// prefix_ + 12 位小写 hex + 14 位大小写字母数字。上游现严格校验该形态
+//（另要求 UA 版本 ≥1.17.0），非法即 FreeTierError/UpgradeRequired 拒掉。
 function nidLike(p) {
-  const r = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
+  const hex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
+    .map((b) => "0123456789abcdef"[b & 15]).join("");
+  const mix = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
     .map((b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[b % 62]).join("");
-  return `${p}_${Date.now().toString(36)}${r(16)}`;
+  return `${p}_${hex(12)}${mix(14)}`;
 }
 
 async function zenFetch(path, { method = "GET", body = undefined, stream = false, fwd = null } = {}) {
