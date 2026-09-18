@@ -4,7 +4,9 @@
 export const config = { path: ["/v1/*", "/geo", "/"] };
 
 const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1788885483175
-const UA = "opencode/1.17.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
+// 免费层准入要求 UA 版本 ≥ 1.18.0（1.17.18 会吃 426 / "OpenCode 1.18.0 or newer is required"）。
+// 客户端（本地 6449）自己带 opencode/ 前缀的 UA 时优先透传它，这里只是兜底，**绝不能写死旧版本**。
+const UA_FALLBACK = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 
 // responses-only 模型：zen 上只有 /v1/responses 端口，chat/messages 需桥接。
 // 与本地 6448 脚本（server.mjs chatToResponsesBody / responsesToChatCompletion）对齐。
@@ -121,7 +123,8 @@ function chatToResponsesBody(chatBody, upstreamModel) {
     chatBody.extra_body?.reasoning_effort ?? chatBody.extra_body?.reasoning?.effort;
   const effortSet = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
   const clientEffort = effortSet.has(effortSrc) ? effortSrc : null;
-  const effort = clientEffort || (upstreamModel.startsWith("muse-spark-") ? "xhigh" : null);
+  // 推理档位一律由客户端决定（不再对 muse-spark-* 注入默认 xhigh）
+  const effort = clientEffort;
   const temp = Number(chatBody.temperature);
   const topP = Number(chatBody.top_p);
   const outCap = Number(chatBody.max_tokens) > MIN_OUTPUT_TOKENS ? Number(chatBody.max_tokens) : MIN_OUTPUT_TOKENS;
@@ -211,11 +214,14 @@ function responsesEventToChatChunk(ev, payload, model) {
 
 function zenHeaders(contentType, fwd) {
   // 上游现强制要求 x-opencode-session（缺失即 MissingSessionID 400
-  // "free tier can only be used in OpenCode"）。本地 6448 每次都带真 session
+  // "free tier can only be used in OpenCode"）。本地 6449 每次都带真 session
   // 下来，边缘函数必须原样透传；直连 curl 等没带时现场生成一个兜底。
+  // User-Agent 同理：客户端带 opencode/ 前缀就用它的（版本由客户端保证 ≥1.18.0），
+  // 否则用兜底——**绝不能写死旧版本**，否则整条链路 426。
+  const clientUA = fwd?.ua || "";
   return {
     "Authorization": "Bearer public",
-    "User-Agent": UA,
+    "User-Agent": /^opencode\//i.test(clientUA) ? clientUA : UA_FALLBACK,
     "Content-Type": contentType || "application/json",
     "x-opencode-client": "cli",
     "x-opencode-project": "global",
@@ -280,7 +286,7 @@ function anthropicToResponsesBody(aBody, upstreamModel) {
     model: upstreamModel, input, stream: !!aBody.stream,
     max_output_tokens: Number(aBody.max_tokens) > MIN_OUTPUT_TOKENS ? Number(aBody.max_tokens) : MIN_OUTPUT_TOKENS,
     ...(instructions ? { instructions } : {}),
-    ...(upstreamModel.startsWith("muse-spark-") ? { reasoning: { effort: "xhigh" } } : {}),
+    // 推理档位一律由客户端决定，不再补默认 xhigh
   };
 }
 
@@ -375,6 +381,7 @@ export default async function handler(req) {
   const fwd = {
     session: req.headers.get("x-opencode-session") || "",
     request: req.headers.get("x-opencode-request") || "",
+    ua: req.headers.get("user-agent") || "",
   };
 
   // ── chat.completions 桥接（仅 responses-only 模型；其余透传）──
@@ -532,15 +539,12 @@ export default async function handler(req) {
   }
 
   // ── 默认：原样透传（responses / models / 非 muse 模型等）──
-  // 唯一例外：muse-spark 的 responses 请求没带 reasoning.effort 时默认补 xhigh
-  // （对齐本地脚本满血默认；客户端显式值一律保留）。
+  // 只兜底 max_output_tokens 下限（太小会被思考吃光导致 status=incomplete 截断）；
+  // 推理档位一律由客户端决定，不再补默认 xhigh（xhigh + 多工具会触发上游 500）。
   let body = ["GET", "HEAD"].includes(method) ? undefined : rawBody;
   if (targetPath === "/v1/responses" && reqJson) {
     if (bridge) {
       const patch = {};
-      if (!reqJson.reasoning?.effort && !reqJson.reasoning_effort && !reqJson.effort) {
-        patch.reasoning = { effort: "xhigh" };
-      }
       const n = Number(reqJson.max_output_tokens);
       if (!Number.isFinite(n) || n < MIN_OUTPUT_TOKENS) patch.max_output_tokens = MIN_OUTPUT_TOKENS;
       if (Object.keys(patch).length) body = JSON.stringify({ ...reqJson, ...patch });
