@@ -3,7 +3,7 @@
 // 出口 IP 也随 POP。Edge 限制：50ms CPU（IO 等待不计）、首包须 40s 内开始、无墙钟上限公布。
 export const config = { path: ["/v1/*", "/geo", "/"] };
 
-const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1790335653192
+const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1790336095851
 // 免费层准入要求 UA 版本 ≥ 1.18.0（1.17.18 会吃 426 / "OpenCode 1.18.0 or newer is required"）。
 // 客户端（本地 6449）自己带 opencode/ 前缀的 UA 时优先透传它，这里只是兜底，**绝不能写死旧版本**。
 const UA_FALLBACK = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
