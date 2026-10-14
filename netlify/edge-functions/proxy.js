@@ -3,7 +3,11 @@
 // 出口 IP 也随 POP。Edge 限制：50ms CPU（IO 等待不计）、首包须 40s 内开始、无墙钟上限公布。
 export const config = { path: ["/v1/*", "/geo", "/"] };
 
-const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1791367762269
+const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1791999291926
+// 上游免费层端点前缀。2026-10-15 实锤：免费层只认 /inference/v1/*，
+// 老的 /zen/v1/* 对 chat / messages 一律 403 FreeTierError（/zen/v1/models 仍 200）。
+// 官方桌面版客户端走的正是 /inference/v1/*（MITM 抓包 + 逐字节回放实证）。
+const ZEN = "/inference";
 // 免费层准入要求 UA 版本 ≥ 1.18.0（1.17.18 会吃 426 / "OpenCode 1.18.0 or newer is required"）。
 // 客户端（本地 6449）自己带 opencode/ 前缀的 UA 时优先透传它，这里只是兜底，**绝不能写死旧版本**。
 const UA_FALLBACK = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
@@ -219,13 +223,17 @@ function zenHeaders(contentType, fwd) {
   // User-Agent 同理：客户端带 opencode/ 前缀就用它的（版本由客户端保证 ≥1.18.0），
   // 否则用兜底——**绝不能写死旧版本**，否则整条链路 426。
   const clientUA = fwd?.ua || "";
+  const session = fwd?.session || nidLike("ses");
   return {
     "Authorization": "Bearer public",
     "User-Agent": /^opencode\//i.test(clientUA) ? clientUA : UA_FALLBACK,
     "Content-Type": contentType || "application/json",
     "x-opencode-client": "cli",
     "x-opencode-project": "global",
-    "x-opencode-session": fwd?.session || nidLike("ses"),
+    "x-opencode-session": session,
+    // 2026-10-15：上游同时校验 x-opencode-session-id（两个头各自按官方 ID 布局验，
+    // 值不必相同；缺任一即 403）。本地 6449 两个头都带，这里原样透传。
+    "x-opencode-session-id": fwd?.sessionId || session,
     "x-opencode-request": fwd?.request || nidLike("msg"),
   };
 }
@@ -242,7 +250,7 @@ function nidLike(p) {
 }
 
 async function zenFetch(path, { method = "GET", body = undefined, stream = false, fwd = null } = {}) {
-  const r = await fetch(UPSTREAM + "/zen" + path, {
+  const r = await fetch(UPSTREAM + ZEN + path, {
     method,
     headers: { ...zenHeaders("application/json", fwd), ...(stream ? { "Accept": "text/event-stream" } : {}) },
     body,
@@ -380,6 +388,7 @@ export default async function handler(req) {
   // 下游（本地 6448）带来的真 session/request id，原样透传给 zen
   const fwd = {
     session: req.headers.get("x-opencode-session") || "",
+    sessionId: req.headers.get("x-opencode-session-id") || "",
     request: req.headers.get("x-opencode-request") || "",
     ua: req.headers.get("user-agent") || "",
   };
@@ -551,7 +560,7 @@ export default async function handler(req) {
     }
     // 流式一律走立即-200 通道（绕开 40s 响应头超时/函数超时；错误转流内帧）
     if (reqJson.stream) {
-      const upP = fetch(UPSTREAM + "/zen" + targetPath, {
+      const upP = fetch(UPSTREAM + ZEN + targetPath, {
         method,
         headers: zenHeaders(req.headers.get("content-type"), fwd),
         body,
@@ -559,7 +568,7 @@ export default async function handler(req) {
       return egressStreamResponse(upP);
     }
   }
-  const r = await fetch(UPSTREAM + "/zen" + targetPath, {
+  const r = await fetch(UPSTREAM + ZEN + targetPath, {
     method,
     headers: zenHeaders(req.headers.get("content-type"), fwd),
     body,
