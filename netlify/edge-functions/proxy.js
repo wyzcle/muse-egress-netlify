@@ -3,7 +3,7 @@
 // 出口 IP 也随 POP。Edge 限制：50ms CPU（IO 等待不计）、首包须 40s 内开始、无墙钟上限公布。
 export const config = { path: ["/v1/*", "/geo", "/"] };
 
-const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1792736354600
+const UPSTREAM = "https://opencode.ai"; // ROTATION STAMP: 1792736403448
 // 上游免费层端点前缀。2026-10-15 实锤：免费层只认 /inference/v1/*，
 // 老的 /zen/v1/* 对 chat / messages 一律 403 FreeTierError（/zen/v1/models 仍 200）。
 // 官方桌面版客户端走的正是 /inference/v1/*（MITM 抓包 + 逐字节回放实证）。
